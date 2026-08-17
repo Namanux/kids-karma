@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { supabase } from '../lib/supabase'
 import { formatCoins, coinsToLevel, formatTime, getTaskStatus, calculateCoins } from '../lib/points'
+import * as XLSX from 'xlsx'
 
 /* ─── Emoji Picker ─── */
 const TASK_EMOJIS = [
@@ -412,15 +413,18 @@ function TasksTab({ kids }) {
   useEffect(() => { loadTasks() }, [])
 
   async function loadTasks() {
-    const { data } = await supabase.from('tasks').select('*, kid:assigned_to(name, avatar_emoji)').order('start_time')
+    const { data } = await supabase.from('tasks')
+      .select('*, kid:assigned_to(name, avatar_emoji)')
+      .neq('is_active', false)
+      .order('start_time')
     setTasks(data || [])
   }
 
   async function saveTask(task) {
     if (task.id) {
-      await supabase.from('tasks').update(task).eq('id', task.id)
+      await supabase.from('tasks').update({ ...task, is_active: true }).eq('id', task.id)
     } else {
-      await supabase.from('tasks').insert(task)
+      await supabase.from('tasks').insert({ ...task, is_active: true })
     }
     setForm(null)
     loadTasks()
@@ -428,12 +432,12 @@ function TasksTab({ kids }) {
 
   async function deleteTask(id) {
     if (!confirm('Delete this task?')) return
-    await supabase.from('tasks').update({ is_active: false }).eq('id', id)
+    const { error } = await supabase.from('tasks').update({ is_active: false }).eq('id', id)
+    if (error) { alert('Delete failed: ' + error.message); return }
     loadTasks()
   }
 
   async function exportToExcel() {
-    const { default: XLSX } = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm')
     const rows = tasks.map(t => ({
       name: t.name,
       icon: t.icon,
@@ -460,7 +464,6 @@ function TasksTab({ kids }) {
     if (!file) return
     setImporting(true)
     try {
-      const { default: XLSX } = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm')
       const ab = await file.arrayBuffer()
       const wb = XLSX.read(ab)
       const ws = wb.Sheets[wb.SheetNames[0]]
@@ -510,9 +513,28 @@ function TasksTab({ kids }) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <h2 style={{ fontWeight: 700 }}>Tasks</h2>
-        <button onClick={() => setForm({})} className="btn btn-primary" style={{ padding: '10px 18px', fontSize: 14 }}>
-          + New Task
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {tasks.length > 0 && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Delete all ${tasks.length} tasks? This cannot be undone.`)) return
+                const { error } = await supabase.from('tasks').update({ is_active: false }).not('id', 'is', null)
+                if (error) { alert('Clear All failed: ' + error.message); return }
+                loadTasks()
+              }}
+              style={{
+                padding: '10px 18px', fontSize: 14, borderRadius: 10,
+                background: 'rgba(239,68,68,0.12)', color: '#ef4444',
+                border: '1px solid rgba(239,68,68,0.3)', cursor: 'pointer', fontWeight: 600,
+              }}
+            >
+              🗑 Clear All
+            </button>
+          )}
+          <button onClick={() => setForm({})} className="btn btn-primary" style={{ padding: '10px 18px', fontSize: 14 }}>
+            + New Task
+          </button>
+        </div>
       </div>
 
       {/* Excel import/export bar */}
