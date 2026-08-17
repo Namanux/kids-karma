@@ -139,7 +139,7 @@ export default function KidDashboard() {
       })
 
       const { error: updateErr } = await supabase.from('profiles')
-        .update({ coin_balance: currentBalance + coinsEarned })
+        .update({ coin_balance: Math.max(0, currentBalance + coinsEarned) })
         .eq('id', profile.id)
 
       if (updateErr) {
@@ -184,7 +184,7 @@ export default function KidDashboard() {
     })
 
     await supabase.from('profiles')
-      .update({ coin_balance: currentBalance + honestyCoins })
+      .update({ coin_balance: Math.max(0, currentBalance + honestyCoins) })
       .eq('id', profile.id)
 
     popCoins(task.id, honestyCoins)
