@@ -408,7 +408,6 @@ function TaskCard({ task, completed, completion, onComplete, coinPop, celebratin
 function AmbientMode({ profile, tasks, completions, now, onWake }) {
   const todayCompletedIds = new Set(completions.map(c => c.task_id))
   const nextTask = tasks.find(t => !todayCompletedIds.has(t.id) && getTaskStatus(t) !== 'missed')
-  const level = coinsToLevel(profile?.coin_balance || 0)
 
   const timeStr = now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: true })
   const dateStr = now.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })
@@ -419,68 +418,50 @@ function AmbientMode({ profile, tasks, completions, now, onWake }) {
       style={{
         height: '100%', display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
-        background: 'radial-gradient(ellipse at center, #0d0d28 0%, #050510 100%)',
+        background: '#000000',
       }}
     >
-      {/* Stars bg */}
-      <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}>
-        {Array.from({ length: 40 }).map((_, i) => (
-          <div key={i} style={{
-            position: 'absolute',
-            width: Math.random() > 0.8 ? 3 : 2,
-            height: Math.random() > 0.8 ? 3 : 2,
-            borderRadius: '50%',
-            background: 'white',
-            opacity: 0.2 + Math.random() * 0.5,
-            left: `${Math.random() * 100}%`,
-            top: `${Math.random() * 100}%`,
-          }} />
-        ))}
-      </div>
-
-      <div style={{ textAlign: 'center', zIndex: 1 }}>
-        {/* Avatar */}
+      <div style={{ textAlign: 'center' }}>
+        {/* Clock — large, white only */}
         <div style={{
-          width: 80, height: 80, borderRadius: '50%',
-          background: profile?.avatar_color || '#4f8ef7',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 36, margin: '0 auto 20px',
+          fontSize: 'clamp(64px, 18vw, 100px)',
+          fontWeight: 300,
+          letterSpacing: -2,
+          color: '#ffffff',
+          lineHeight: 1,
+          fontVariantNumeric: 'tabular-nums',
         }}>
-          {profile?.avatar_emoji || '😊'}
-        </div>
-
-        {/* Clock */}
-        <div style={{ fontSize: 72, fontWeight: 800, letterSpacing: -2, color: 'white', lineHeight: 1 }}>
           {timeStr}
         </div>
-        <div style={{ fontSize: 18, color: '#94a3b8', marginTop: 8 }}>{dateStr}</div>
 
-        {/* Coins */}
-        <div style={{ marginTop: 24, fontSize: 28, color: '#f5c518', fontWeight: 800 }}>
-          {level.emoji} {formatCoins(profile?.coin_balance || 0)} coins
+        {/* Date */}
+        <div style={{
+          fontSize: 18, color: 'rgba(255,255,255,0.45)',
+          marginTop: 12, fontWeight: 400, letterSpacing: 0.5,
+        }}>
+          {dateStr}
         </div>
 
-        {/* Next task */}
+        {/* Next task — subtle, white only */}
         {nextTask && (
           <div style={{
-            marginTop: 24, padding: '14px 28px', borderRadius: 14,
-            background: 'rgba(245,197,24,0.08)',
-            border: '1px solid rgba(245,197,24,0.2)',
-            color: '#f5c518',
+            marginTop: 36,
+            color: 'rgba(255,255,255,0.25)',
+            fontSize: 14,
+            fontWeight: 400,
           }}>
-            <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>Next task</div>
-            <div style={{ fontWeight: 700, fontSize: 17 }}>
-              {nextTask.icon} {nextTask.name}
-            </div>
-            <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>
-              {formatTime(nextTask.start_time)}
-            </div>
+            Next: {nextTask.icon} {nextTask.name} · {formatTime(nextTask.start_time)}
           </div>
         )}
+      </div>
 
-        <div style={{ marginTop: 32, fontSize: 13, color: '#475569' }}>
-          Tap anywhere to wake up
-        </div>
+      {/* Tap hint */}
+      <div style={{
+        position: 'absolute', bottom: 32,
+        fontSize: 12, color: 'rgba(255,255,255,0.12)',
+        letterSpacing: 1,
+      }}>
+        TAP TO WAKE
       </div>
     </div>
   )

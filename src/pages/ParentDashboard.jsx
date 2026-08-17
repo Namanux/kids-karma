@@ -1,7 +1,78 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { supabase } from '../lib/supabase'
 import { formatCoins, coinsToLevel, formatTime, getTaskStatus, calculateCoins } from '../lib/points'
+
+/* ─── Emoji Picker ─── */
+const TASK_EMOJIS = [
+  '📚','📖','✏️','📝','🔬','🔭','🎨','🖊️','📐','📏',
+  '☀️','⏰','🛏️','🦷','🚿','🛁','👕','🥛','🍎','🌅',
+  '🏃','💪','⚽','🏀','🎾','🚴','🏊','🤸','🧘','🥊',
+  '🧹','🧺','🍽️','🗑️','🌿','🐕','🪣','🧽','🪴','🏠',
+  '🥗','🍳','🥦','🍱','🥪','🧁','🧃','🥄','🌮','🍉',
+  '🌙','🛌','💤','⭐','🌟','🙏','🪥','🧸','🌛','📓',
+  '⭐','🏆','🎯','💎','🪙','🎁','✨','🔥','💫','❤️',
+  '😊','🎵','🎮','🎬','🎲','🎭','🎸','📺','🃏','🤖',
+]
+
+function EmojiPicker({ value, onChange }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: 64, height: 52, fontSize: 24,
+          background: 'rgba(255,255,255,0.05)',
+          border: open ? '1px solid var(--accent-gold)' : '1px solid var(--border)',
+          borderRadius: 'var(--radius-sm)',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'border-color 0.15s',
+        }}
+        title="Pick emoji"
+      >
+        {value || '⭐'}
+      </button>
+
+      {open && (
+        <>
+          <div
+            onClick={() => setOpen(false)}
+            style={{ position: 'fixed', inset: 0, zIndex: 90 }}
+          />
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, zIndex: 100,
+            background: '#1a1a2e',
+            border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: 12, padding: 10, marginTop: 4,
+            display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)',
+            gap: 2, width: 296, maxHeight: 220, overflowY: 'auto',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.7)',
+          }}>
+            {TASK_EMOJIS.map(e => (
+              <button
+                key={e}
+                type="button"
+                onClick={() => { onChange(e); setOpen(false) }}
+                style={{
+                  fontSize: 22, padding: '5px 2px', borderRadius: 6,
+                  background: value === e ? 'rgba(245,197,24,0.2)' : 'transparent',
+                  border: value === e ? '1px solid rgba(245,197,24,0.4)' : '1px solid transparent',
+                  cursor: 'pointer', lineHeight: 1.2,
+                }}
+              >
+                {e}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
 
 const TABS = ['Overview', 'Approve', 'Tasks', 'Rewards', 'Message']
 
@@ -330,9 +401,13 @@ function ApprovalCard({ comp, onApprove, onReject }) {
 }
 
 /* ─── Tasks ─── */
+const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+
 function TasksTab({ kids }) {
   const [tasks, setTasks] = useState([])
   const [form, setForm] = useState(null)
+  const [importing, setImporting] = useState(false)
+  const importRef = useRef(null)
 
   useEffect(() => { loadTasks() }, [])
 
@@ -357,6 +432,71 @@ function TasksTab({ kids }) {
     loadTasks()
   }
 
+  async function exportToExcel() {
+    const { default: XLSX } = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm')
+    const rows = tasks.map(t => ({
+      name: t.name,
+      icon: t.icon,
+      assigned_to: t.kid?.name || '',
+      days: (t.days_of_week || []).map(d => DAY_NAMES[d]).join(','),
+      start_time: t.start_time,
+      deadline_time: t.deadline_time,
+      expiry_time: t.expiry_time,
+      full_coins: t.full_coins,
+      min_coins: t.min_coins,
+      penalty_coins: t.penalty_coins,
+      approval_every: t.requires_approval_every,
+    }))
+    const ws = XLSX.utils.json_to_sheet(rows)
+    // Set column widths
+    ws['!cols'] = [20,8,14,20,12,16,14,12,10,14,16].map(w => ({ wch: w }))
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Tasks')
+    XLSX.writeFile(wb, 'kids-karma-tasks.xlsx')
+  }
+
+  async function importFromExcel(e) {
+    const file = e.target.files[0]
+    if (!file) return
+    setImporting(true)
+    try {
+      const { default: XLSX } = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm')
+      const ab = await file.arrayBuffer()
+      const wb = XLSX.read(ab)
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const rows = XLSX.utils.sheet_to_json(ws)
+      let imported = 0, skipped = 0
+      for (const row of rows) {
+        const kid = kids.find(k => k.name.toLowerCase() === (row.assigned_to || '').toLowerCase())
+        if (!kid || !row.name) { skipped++; continue }
+        const days = String(row.days || '').split(',')
+          .map(d => DAY_NAMES.indexOf(d.trim()))
+          .filter(d => d >= 0)
+        await supabase.from('tasks').insert({
+          name: String(row.name),
+          icon: String(row.icon || '⭐'),
+          assigned_to: kid.id,
+          days_of_week: days,
+          start_time: String(row.start_time || '07:00'),
+          deadline_time: String(row.deadline_time || '07:30'),
+          expiry_time: String(row.expiry_time || '08:00'),
+          full_coins: parseInt(row.full_coins) || 20,
+          min_coins: parseInt(row.min_coins) || 5,
+          penalty_coins: parseInt(row.penalty_coins) || 10,
+          requires_approval_every: parseInt(row.approval_every) || 3,
+          is_active: true,
+        })
+        imported++
+      }
+      alert(`✅ Imported ${imported} task${imported !== 1 ? 's' : ''}${skipped ? ` (${skipped} skipped — unknown kid name)` : ''}.`)
+      loadTasks()
+    } catch (err) {
+      alert('Import failed: ' + err.message)
+    }
+    setImporting(false)
+    e.target.value = ''
+  }
+
   if (form !== null) return (
     <TaskForm
       task={form}
@@ -368,11 +508,45 @@ function TasksTab({ kids }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <h2 style={{ fontWeight: 700 }}>Tasks</h2>
         <button onClick={() => setForm({})} className="btn btn-primary" style={{ padding: '10px 18px', fontSize: 14 }}>
           + New Task
         </button>
+      </div>
+
+      {/* Excel import/export bar */}
+      <div style={{
+        display: 'flex', gap: 8, marginBottom: 16,
+        padding: '10px 14px', borderRadius: 10,
+        background: 'rgba(255,255,255,0.03)',
+        border: '1px solid var(--border)',
+        alignItems: 'center',
+      }}>
+        <span style={{ fontSize: 13, color: '#94a3b8', flex: 1 }}>📊 Excel</span>
+        <button
+          onClick={exportToExcel}
+          disabled={tasks.length === 0}
+          style={{
+            padding: '6px 14px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(34,197,94,0.12)', color: '#22c55e',
+            border: '1px solid rgba(34,197,94,0.25)', cursor: 'pointer',
+          }}
+        >
+          ↓ Export
+        </button>
+        <button
+          onClick={() => importRef.current?.click()}
+          disabled={importing}
+          style={{
+            padding: '6px 14px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(79,142,247,0.12)', color: '#4f8ef7',
+            border: '1px solid rgba(79,142,247,0.25)', cursor: 'pointer',
+          }}
+        >
+          {importing ? 'Importing…' : '↑ Import'}
+        </button>
+        <input ref={importRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={importFromExcel} />
       </div>
 
       {tasks.map(task => (
@@ -440,7 +614,7 @@ function TaskForm({ task, kids, onSave, onCancel }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Row label="Icon & Name">
           <div style={{ display: 'flex', gap: 8 }}>
-            <input className="input-field" value={form.icon} onChange={e => setForm(f=>({...f,icon:e.target.value}))} style={{ width: 64, textAlign: 'center', fontSize: 22 }} />
+            <EmojiPicker value={form.icon} onChange={emoji => setForm(f=>({...f,icon:emoji}))} />
             <input className="input-field" value={form.name} placeholder="Task name" onChange={e => setForm(f=>({...f,name:e.target.value}))} style={{ flex: 1 }} />
           </div>
         </Row>
@@ -569,7 +743,7 @@ function RewardsTab({ kids }) {
       {showForm && (
         <div className="card" style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-            <input className="input-field" value={form.icon} onChange={e=>setForm(f=>({...f,icon:e.target.value}))} style={{ width:56, textAlign:'center', fontSize:22 }} />
+            <EmojiPicker value={form.icon} onChange={emoji=>setForm(f=>({...f,icon:emoji}))} />
             <input className="input-field" value={form.name} placeholder="Reward name" onChange={e=>setForm(f=>({...f,name:e.target.value}))} style={{ flex:1 }} />
           </div>
           <input className="input-field" value={form.description} placeholder="Description (optional)" onChange={e=>setForm(f=>({...f,description:e.target.value}))} style={{ marginBottom:10 }} />

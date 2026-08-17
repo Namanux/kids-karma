@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 
 const AVATAR_COLORS = {
@@ -9,7 +9,16 @@ const AVATAR_COLORS = {
 
 export default function Login() {
   const { profiles, loginWithPin, loginWithPassword } = useAuth()
-  const [selected, setSelected] = useState(null)
+
+  // Auto-select profile from URL param e.g. ?user=Aaron
+  const urlKid = new URLSearchParams(window.location.search).get('user')
+  const autoProfile = urlKid ? profiles.find(p => p.name.toLowerCase() === urlKid.toLowerCase()) : null
+
+  const [selected, setSelected] = useState(autoProfile?.id || null)
+
+  useEffect(() => {
+    if (autoProfile && !selected) setSelected(autoProfile.id)
+  }, [profiles])
   const [pin, setPin] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
