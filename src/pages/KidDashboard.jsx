@@ -6,6 +6,11 @@ import {
   formatCountdown, formatTime, formatCoins, coinsToLevel
 } from '../lib/points'
 
+// Use local date string (not UTC) to avoid midnight timezone bugs
+function localDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export default function KidDashboard() {
   const { profile, logout, refreshCurrentProfile } = useAuth()
   const [tasks, setTasks] = useState([])
@@ -17,11 +22,27 @@ export default function KidDashboard() {
   const [shakeId, setShakeId] = useState(null)
   const [celebrateId, setCelebrateId] = useState(null)
   const idleTimer = useRef(null)
-  const today = now.toISOString().split('T')[0]
 
-  // Clock
+  // Local-date string for "today" (Brisbane-safe)
+  const todayStr = localDateStr(now)
+
+  // The date currently being viewed (can navigate to past/future)
+  const [viewDate, setViewDate] = useState(todayStr)
+  const viewDateRef = useRef(viewDate)
+  useEffect(() => { viewDateRef.current = viewDate }, [viewDate])
+
+  const isToday = viewDate === todayStr
+
+  // Clock — also keeps todayStr fresh across midnight
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000)
+    const t = setInterval(() => {
+      const newNow = new Date()
+      setNow(newNow)
+      // If the day has ticked over and we're viewing "today", keep up
+      if (viewDateRef.current === localDateStr(new Date(newNow - 1000))) {
+        setViewDate(localDateStr(newNow))
+      }
+    }, 1000)
     return () => clearInterval(t)
   }, [])
 
@@ -43,7 +64,7 @@ export default function KidDashboard() {
     }
   }, [])
 
-  // Load data
+  // Load data whenever profile or viewDate changes
   useEffect(() => {
     if (!profile) return
     loadTasks()
@@ -55,11 +76,15 @@ export default function KidDashboard() {
       .subscribe()
 
     return () => ch.unsubscribe()
-  }, [profile?.id])
+  }, [profile?.id, viewDate])
 
   async function loadTasks() {
     if (!profile) return
-    const dayOfWeek = new Date().getDay()
+    const vd = viewDateRef.current
+    // Parse date at noon local time to safely get the correct day-of-week
+    const [y, m, d] = vd.split('-').map(Number)
+    const dayOfWeek = new Date(y, m - 1, d, 12, 0, 0).getDay()
+
     const { data: taskData } = await supabase
       .from('tasks')
       .select('*')
@@ -72,7 +97,7 @@ export default function KidDashboard() {
       .from('task_completions')
       .select('*')
       .eq('kid_id', profile.id)
-      .eq('scheduled_date', today)
+      .eq('scheduled_date', vd)
 
     setTasks(taskData || [])
     setCompletions(compData || [])
@@ -100,9 +125,7 @@ export default function KidDashboard() {
     if (existing) return
 
     const status = getTaskStatus(task)
-    // Allow completion any time during the day — missed tasks get half coins
 
-    // How many times has this task been completed historically?
     const { count } = await supabase
       .from('task_completions')
       .select('*', { count: 'exact', head: true })
@@ -118,14 +141,13 @@ export default function KidDashboard() {
     const { data: comp } = await supabase.from('task_completions').insert({
       task_id: task.id,
       kid_id: profile.id,
-      scheduled_date: today,
+      scheduled_date: todayStr,   // always use local today
       coins_earned: coinsEarned,
       status: approvalStatus,
       completion_count: completionNumber,
     }).select().single()
 
     if (!needsApproval) {
-      // Fetch current balance fresh from DB to avoid stale state issues
       const { data: freshKid } = await supabase
         .from('profiles').select('coin_balance').eq('id', profile.id).single()
       const currentBalance = freshKid?.coin_balance || 0
@@ -146,7 +168,6 @@ export default function KidDashboard() {
         console.error('Balance update failed:', updateErr.message)
       }
 
-      // Coin pop animation
       setCelebrateId(task.id)
       setTimeout(() => setCelebrateId(null), 1500)
       popCoins(task.id, coinsEarned)
@@ -165,7 +186,7 @@ export default function KidDashboard() {
     const { data: comp } = await supabase.from('task_completions').insert({
       task_id: task.id,
       kid_id: profile.id,
-      scheduled_date: today,
+      scheduled_date: todayStr,   // always use local today
       coins_earned: honestyCoins,
       status: 'auto_approved',
       completion_count: 0,
@@ -198,6 +219,29 @@ export default function KidDashboard() {
     setTimeout(() => setCoinPops(p => p.filter(x => x.id !== id)), 1000)
   }
 
+  // Date navigation helpers
+  function shiftDate(days) {
+    const [y, m, d] = viewDate.split('-').map(Number)
+    const next = new Date(y, m - 1, d + days, 12, 0, 0)
+    setViewDate(localDateStr(next))
+  }
+
+  function viewDateLabel() {
+    const [y, m, d] = viewDate.split('-').map(Number)
+    const date = new Date(y, m - 1, d, 12, 0, 0)
+    if (isToday) return date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'short' }) + ' · Today'
+    const diffDays = Math.round((new Date(y, m - 1, d) - new Date(localDateStr(now).split('-').map((v,i) => i === 1 ? v-1 : +v).reduce((acc, v, i) => { const d = new Date(); if(i===0) d.setFullYear(v); if(i===1) d.setMonth(v); if(i===2) d.setDate(v); return d; }, new Date()))) / 86400000)
+    return date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'short' })
+  }
+
+  // Simpler date label
+  function formatViewDate() {
+    const [y, m, d] = viewDate.split('-').map(Number)
+    const date = new Date(y, m - 1, d, 12, 0, 0)
+    const label = date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'short' })
+    return isToday ? `${label} · Today` : label
+  }
+
   const level = coinsToLevel(profile?.coin_balance || 0)
   const todayCompletedIds = new Set(completions.map(c => c.task_id))
   const totalToday = tasks.length
@@ -217,17 +261,39 @@ export default function KidDashboard() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <div>
-            <p style={{ color: '#94a3b8', fontSize: 13 }}>
-              {now.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'short' })}
-            </p>
+          <div style={{ flex: 1 }}>
+            {/* Date row with left/right arrows */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                onClick={e => { e.stopPropagation(); shiftDate(-1) }}
+                style={{
+                  width: 28, height: 28, borderRadius: 8, border: '1px solid var(--border)',
+                  background: 'rgba(255,255,255,0.05)', color: '#94a3b8',
+                  fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', flexShrink: 0,
+                }}
+              >‹</button>
+              <p style={{ color: '#94a3b8', fontSize: 13, flex: 1, textAlign: 'center' }}>
+                {formatViewDate()}
+              </p>
+              <button
+                onClick={e => { e.stopPropagation(); shiftDate(1) }}
+                style={{
+                  width: 28, height: 28, borderRadius: 8, border: '1px solid var(--border)',
+                  background: 'rgba(255,255,255,0.05)', color: '#94a3b8',
+                  fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', flexShrink: 0,
+                }}
+              >›</button>
+            </div>
             <h1 style={{ fontSize: 26, fontWeight: 800, marginTop: 2 }}>
               Hey {profile?.name}! {profile?.avatar_emoji}
             </h1>
           </div>
           <button onClick={logout} style={{
             fontSize: 12, color: '#475569', padding: '6px 10px',
-            background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid var(--border)'
+            background: 'rgba(255,255,255,0.05)', borderRadius: 8, border: '1px solid var(--border)',
+            marginLeft: 12,
           }}>
             Switch
           </button>
@@ -264,7 +330,7 @@ export default function KidDashboard() {
           </div>
         </div>
 
-        {/* Progress today */}
+        {/* Progress for viewed date */}
         <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
           <div className="progress-bar" style={{ flex: 1 }}>
             <div className="progress-fill" style={{
@@ -302,13 +368,35 @@ export default function KidDashboard() {
         </div>
       )}
 
+      {/* Past/future date notice */}
+      {!isToday && (
+        <div style={{
+          margin: '8px 16px 0',
+          padding: '8px 14px',
+          borderRadius: 10,
+          background: 'rgba(79,142,247,0.08)',
+          border: '1px solid rgba(79,142,247,0.2)',
+          fontSize: 12,
+          color: '#4f8ef7',
+          textAlign: 'center',
+          flexShrink: 0,
+        }}>
+          📅 Viewing {viewDate < todayStr ? 'past' : 'future'} tasks — read only
+          {' '}·{' '}
+          <span
+            onClick={e => { e.stopPropagation(); setViewDate(todayStr) }}
+            style={{ textDecoration: 'underline', cursor: 'pointer' }}
+          >Go to today</span>
+        </div>
+      )}
+
       {/* Task list */}
       <div className="scroll-y" style={{ flex: 1, padding: 16, paddingTop: 12 }}>
         {tasks.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px 20px', color: '#475569' }}>
             <div style={{ fontSize: 48, marginBottom: 12 }}>🎉</div>
-            <p style={{ fontWeight: 600, fontSize: 18 }}>No tasks today!</p>
-            <p style={{ marginTop: 8, fontSize: 14 }}>Enjoy your free time.</p>
+            <p style={{ fontWeight: 600, fontSize: 18 }}>No tasks{isToday ? ' today' : ' this day'}!</p>
+            <p style={{ marginTop: 8, fontSize: 14 }}>{isToday ? 'Enjoy your free time.' : 'Nothing was scheduled.'}</p>
           </div>
         ) : (
           tasks.map(task => (
@@ -322,6 +410,7 @@ export default function KidDashboard() {
               coinPop={coinPops.find(p => p.taskId === task.id)}
               celebrating={celebrateId === task.id}
               now={now}
+              isToday={isToday}
             />
           ))
         )}
@@ -333,7 +422,7 @@ export default function KidDashboard() {
   )
 }
 
-function TaskCard({ task, completed, completion, onComplete, onMiss, coinPop, celebrating, now }) {
+function TaskCard({ task, completed, completion, onComplete, onMiss, coinPop, celebrating, now, isToday }) {
   const status = completed ? 'done' : getTaskStatus(task, false)
   const [countdown, setCountdown] = useState(secondsUntilChange(task, status))
 
@@ -355,7 +444,8 @@ function TaskCard({ task, completed, completion, onComplete, onMiss, coinPop, ce
 
   const cfg = statusConfig[status] || statusConfig.upcoming
   const previewCoins = calculateCoins(task)
-  const isActionable = status !== 'done'
+  // Only show action buttons when viewing today and task isn't done
+  const isActionable = isToday && status !== 'done'
 
   return (
     <div style={{
@@ -401,14 +491,14 @@ function TaskCard({ task, completed, completion, onComplete, onMiss, coinPop, ce
             <span style={{ fontSize: 12, color: '#94a3b8' }}>
               {formatTime(task.start_time)} – {formatTime(task.deadline_time)}
             </span>
-            {!completed && status !== 'missed' && countdown !== null && (
+            {isToday && !completed && status !== 'missed' && countdown !== null && (
               <span style={{ fontSize: 12, color: cfg.labelColor, fontWeight: 600 }}>
                 {status === 'upcoming' ? `Starts in ${formatCountdown(countdown)}` : `${formatCountdown(countdown)} left`}
               </span>
             )}
           </div>
 
-          {!completed && (
+          {!completed && isToday && (
             <div style={{ marginTop: 4, fontSize: 13, color: (status === 'grace' || status === 'missed') ? '#f97316' : '#f5c518' }}>
               {(status === 'grace' || status === 'missed')
                 ? `⚠️ +${Math.max(1, Math.floor(task.full_coins / 2))} coins — late`
@@ -429,7 +519,7 @@ function TaskCard({ task, completed, completion, onComplete, onMiss, coinPop, ce
           )}
         </div>
 
-        {/* Action button */}
+        {/* Action button — only when viewing today */}
         {isActionable && !completed && (
           (status === 'grace' || status === 'missed') ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>

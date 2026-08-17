@@ -14,33 +14,22 @@
  * Given a task and the time of completion, return coins earned.
  * Pass null for completedAt to calculate penalty (not completed).
  */
-export function calculateCoins(task, completedAt = null) {
-  const now = completedAt ? new Date(completedAt) : new Date()
+export function calculateCoins(task, completedAt = new Date()) {
+  const now = new Date(completedAt)
   const today = now.toISOString().split('T')[0]
 
   const deadline = new Date(`${today}T${task.deadline_time}`)
-  const expiry   = new Date(`${today}T${task.expiry_time}`)
-
-  if (!completedAt) {
-    // Not completed — penalty
-    return -Math.abs(task.penalty_coins)
-  }
 
   if (now <= deadline) {
     return task.full_coins
   }
 
-  if (now > expiry) {
-    // Completed after expiry — still 0 (or you could still give min)
-    return task.min_coins
-  }
+  // After deadline (late or missed) — half coins, minimum 1
+  return Math.max(1, Math.floor(task.full_coins / 2))
+}
 
-  // Linear decay between deadline and expiry
-  const totalWindow = expiry - deadline
-  const elapsed = now - deadline
-  const ratio = 1 - (elapsed / totalWindow)
-  const coins = Math.round(task.min_coins + ratio * (task.full_coins - task.min_coins))
-  return Math.max(coins, task.min_coins)
+export function calculatePenalty(task) {
+  return -Math.abs(task.penalty_coins)
 }
 
 /**
