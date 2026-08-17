@@ -100,7 +100,7 @@ export default function KidDashboard() {
     if (existing) return
 
     const status = getTaskStatus(task)
-    if (status === 'upcoming') return
+    // Allow completion any time during the day — missed tasks get half coins
 
     // How many times has this task been completed historically?
     const { count } = await supabase
@@ -125,7 +125,11 @@ export default function KidDashboard() {
     }).select().single()
 
     if (!needsApproval) {
-      // Apply coins immediately
+      // Fetch current balance fresh from DB to avoid stale state issues
+      const { data: freshKid } = await supabase
+        .from('profiles').select('coin_balance').eq('id', profile.id).single()
+      const currentBalance = freshKid?.coin_balance || 0
+
       await supabase.from('coin_transactions').insert({
         kid_id: profile.id,
         amount: coinsEarned,
@@ -133,9 +137,14 @@ export default function KidDashboard() {
         transaction_type: 'task_reward',
         reference_id: comp?.id,
       })
-      await supabase.from('profiles')
-        .update({ coin_balance: Math.max(0, (profile.coin_balance || 0) + coinsEarned) })
+
+      const { error: updateErr } = await supabase.from('profiles')
+        .update({ coin_balance: currentBalance + coinsEarned })
         .eq('id', profile.id)
+
+      if (updateErr) {
+        console.error('Balance update failed:', updateErr.message)
+      }
 
       // Coin pop animation
       setCelebrateId(task.id)
@@ -143,7 +152,44 @@ export default function KidDashboard() {
       popCoins(task.id, coinsEarned)
     }
 
-    loadTasks()
+    await loadTasks()
+    await refreshCurrentProfile()
+  }
+
+  async function missTask(task) {
+    const existing = completions.find(c => c.task_id === task.id)
+    if (existing) return
+
+    const honestyCoins = 1
+
+    const { data: comp } = await supabase.from('task_completions').insert({
+      task_id: task.id,
+      kid_id: profile.id,
+      scheduled_date: today,
+      coins_earned: honestyCoins,
+      status: 'auto_approved',
+      completion_count: 0,
+    }).select().single()
+
+    const { data: freshKid } = await supabase
+      .from('profiles').select('coin_balance').eq('id', profile.id).single()
+    const currentBalance = freshKid?.coin_balance || 0
+
+    await supabase.from('coin_transactions').insert({
+      kid_id: profile.id,
+      amount: honestyCoins,
+      reason: `Honest miss: ${task.name}`,
+      transaction_type: 'task_reward',
+      reference_id: comp?.id,
+    })
+
+    await supabase.from('profiles')
+      .update({ coin_balance: currentBalance + honestyCoins })
+      .eq('id', profile.id)
+
+    popCoins(task.id, honestyCoins)
+    await loadTasks()
+    await refreshCurrentProfile()
   }
 
   function popCoins(taskId, amount) {
@@ -272,6 +318,7 @@ export default function KidDashboard() {
               completed={todayCompletedIds.has(task.id)}
               completion={completions.find(c => c.task_id === task.id)}
               onComplete={() => completeTask(task)}
+              onMiss={() => missTask(task)}
               coinPop={coinPops.find(p => p.taskId === task.id)}
               celebrating={celebrateId === task.id}
               now={now}
@@ -286,7 +333,7 @@ export default function KidDashboard() {
   )
 }
 
-function TaskCard({ task, completed, completion, onComplete, coinPop, celebrating, now }) {
+function TaskCard({ task, completed, completion, onComplete, onMiss, coinPop, celebrating, now }) {
   const status = completed ? 'done' : getTaskStatus(task, false)
   const [countdown, setCountdown] = useState(secondsUntilChange(task, status))
 
@@ -308,7 +355,7 @@ function TaskCard({ task, completed, completion, onComplete, coinPop, celebratin
 
   const cfg = statusConfig[status] || statusConfig.upcoming
   const previewCoins = calculateCoins(task)
-  const isActionable = status === 'active' || status === 'grace'
+  const isActionable = status !== 'done'
 
   return (
     <div style={{
@@ -362,13 +409,11 @@ function TaskCard({ task, completed, completion, onComplete, coinPop, celebratin
           </div>
 
           {!completed && (
-            <div style={{ marginTop: 4, fontSize: 13, color: '#f5c518' }}>
-              🪙 {previewCoins > 0 ? `+${previewCoins}` : previewCoins} coins
-              {task.penalty_coins > 0 && status !== 'done' && (
-                <span style={{ color: '#94a3b8', marginLeft: 8 }}>
-                  (−{task.penalty_coins} if missed)
-                </span>
-              )}
+            <div style={{ marginTop: 4, fontSize: 13, color: (status === 'grace' || status === 'missed') ? '#f97316' : '#f5c518' }}>
+              {(status === 'grace' || status === 'missed')
+                ? `⚠️ +${Math.max(1, Math.floor(task.full_coins / 2))} coins — late`
+                : `🪙 +${previewCoins} coins`
+              }
             </div>
           )}
 
@@ -386,19 +431,48 @@ function TaskCard({ task, completed, completion, onComplete, coinPop, celebratin
 
         {/* Action button */}
         {isActionable && !completed && (
-          <button
-            onClick={onComplete}
-            className={celebrating ? 'glow' : ''}
-            style={{
-              padding: '14px 18px', borderRadius: 12,
-              background: status === 'grace' ? 'rgba(249,115,22,0.2)' : 'rgba(245,197,24,0.2)',
-              border: `1px solid ${status === 'grace' ? 'rgba(249,115,22,0.4)' : 'rgba(245,197,24,0.4)'}`,
-              color: status === 'grace' ? '#f97316' : '#f5c518',
-              fontWeight: 700, fontSize: 13, flexShrink: 0,
-            }}
-          >
-            Done!
-          </button>
+          (status === 'grace' || status === 'missed') ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
+              <button
+                onClick={onComplete}
+                className={celebrating ? 'glow' : ''}
+                style={{
+                  padding: '10px 14px', borderRadius: 10,
+                  background: 'rgba(249,115,22,0.15)',
+                  border: '1px solid rgba(249,115,22,0.4)',
+                  color: '#f97316', fontWeight: 700, fontSize: 12,
+                }}
+              >
+                ✅ Done<br/>
+                <span style={{ fontSize: 10, fontWeight: 500 }}>+{Math.max(1, Math.floor(task.full_coins / 2))}🪙</span>
+              </button>
+              <button
+                onClick={onMiss}
+                style={{
+                  padding: '10px 14px', borderRadius: 10,
+                  background: 'rgba(168,85,247,0.12)',
+                  border: '1px solid rgba(168,85,247,0.3)',
+                  color: '#a855f7', fontWeight: 700, fontSize: 12,
+                }}
+              >
+                😔 Missed<br/>
+                <span style={{ fontSize: 10, fontWeight: 500 }}>+1🪙 honest</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={onComplete}
+              className={celebrating ? 'glow' : ''}
+              style={{
+                padding: '14px 18px', borderRadius: 12,
+                background: 'rgba(245,197,24,0.2)',
+                border: '1px solid rgba(245,197,24,0.4)',
+                color: '#f5c518', fontWeight: 700, fontSize: 13, flexShrink: 0,
+              }}
+            >
+              Done!
+            </button>
+          )
         )}
       </div>
     </div>
