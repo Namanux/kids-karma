@@ -277,11 +277,13 @@ function ApproveTab({ onApprove }) {
   }
 
   async function approve(comp, adjustedCoins) {
+    // Update completion record with final coin amount and approved status
     await supabase.from('task_completions').update({
       status: 'approved',
       coins_earned: adjustedCoins,
     }).eq('id', comp.id)
 
+    // Award coins now (they were held pending this approval)
     await supabase.from('coin_transactions').insert({
       kid_id: comp.kid_id,
       amount: adjustedCoins,
@@ -289,7 +291,6 @@ function ApproveTab({ onApprove }) {
       transaction_type: 'task_reward',
       reference_id: comp.id,
     })
-
     const { data: kid } = await supabase.from('profiles').select('coin_balance').eq('id', comp.kid_id).single()
     await supabase.from('profiles').update({
       coin_balance: Math.max(0, (kid?.coin_balance || 0) + adjustedCoins)
@@ -300,6 +301,7 @@ function ApproveTab({ onApprove }) {
   }
 
   async function reject(comp) {
+    // Mark rejected — no coins awarded (they were held)
     await supabase.from('task_completions').update({ status: 'rejected' }).eq('id', comp.id)
     loadQueue()
     onApprove()
@@ -449,7 +451,7 @@ function TasksTab({ kids }) {
       full_coins: t.full_coins,
       min_coins: t.min_coins,
       penalty_coins: t.penalty_coins,
-      approval_every: t.requires_approval_every,
+      requires_approval: t.requires_approval ? 'yes' : 'no',
     }))
     const ws = XLSX.utils.json_to_sheet(rows)
     // Set column widths
@@ -486,7 +488,7 @@ function TasksTab({ kids }) {
           full_coins: parseInt(row.full_coins) || 20,
           min_coins: parseInt(row.min_coins) || 5,
           penalty_coins: parseInt(row.penalty_coins) || 10,
-          requires_approval_every: parseInt(row.approval_every) || 3,
+          requires_approval: String(row.requires_approval || '').toLowerCase() === 'yes',
           is_active: true,
         })
         imported++
@@ -575,7 +577,22 @@ function TasksTab({ kids }) {
         <div key={task.id} className="card" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ fontSize: 28, flexShrink: 0 }}>{task.icon}</span>
           <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 600 }}>{task.name}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontWeight: 600 }}>{task.name}</span>
+              {task.requires_approval ? (
+                <span style={{
+                  fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                  background: 'rgba(168,85,247,0.15)', color: '#a855f7',
+                  border: '1px solid rgba(168,85,247,0.3)',
+                }}>👀 Needs review</span>
+              ) : (
+                <span style={{
+                  fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                  background: 'rgba(34,197,94,0.12)', color: '#22c55e',
+                  border: '1px solid rgba(34,197,94,0.25)',
+                }}>⚡ Auto</span>
+              )}
+            </div>
             <div style={{ fontSize: 13, color: '#94a3b8' }}>
               {task.kid?.avatar_emoji} {task.kid?.name} · {formatTime(task.start_time)} → {formatTime(task.deadline_time)}
             </div>
@@ -613,7 +630,7 @@ function TaskForm({ task, kids, onSave, onCancel }) {
     full_coins: task.full_coins || 20,
     min_coins: task.min_coins || 5,
     penalty_coins: task.penalty_coins || 10,
-    requires_approval_every: task.requires_approval_every || 3,
+    requires_approval: task.requires_approval ?? false,
     id: task.id,
   })
 
@@ -684,9 +701,35 @@ function TaskForm({ task, kids, onSave, onCancel }) {
           ))}
         </div>
 
-        <Row label="Approval every N completions">
-          <input type="number" className="input-field" value={form.requires_approval_every} min={1}
-            onChange={e => setForm(f=>({...f,requires_approval_every:parseInt(e.target.value)||3}))} />
+        <Row label="Parent approval">
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[
+              { value: false, label: '⚡ Auto-approve', desc: 'Coins land instantly' },
+              { value: true,  label: '👀 Needs review', desc: 'You check before coins land' },
+            ].map(opt => (
+              <button
+                key={String(opt.value)}
+                type="button"
+                onClick={() => setForm(f => ({ ...f, requires_approval: opt.value }))}
+                style={{
+                  flex: 1, padding: '12px 10px', borderRadius: 10, textAlign: 'center',
+                  background: form.requires_approval === opt.value
+                    ? (opt.value ? 'rgba(168,85,247,0.18)' : 'rgba(34,197,94,0.15)')
+                    : 'rgba(255,255,255,0.04)',
+                  border: `1px solid ${form.requires_approval === opt.value
+                    ? (opt.value ? 'rgba(168,85,247,0.5)' : 'rgba(34,197,94,0.4)')
+                    : 'var(--border)'}`,
+                  color: form.requires_approval === opt.value
+                    ? (opt.value ? '#a855f7' : '#22c55e')
+                    : '#94a3b8',
+                  cursor: 'pointer',
+                }}
+              >
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{opt.label}</div>
+                <div style={{ fontSize: 11, marginTop: 3, opacity: 0.8 }}>{opt.desc}</div>
+              </button>
+            ))}
+          </div>
         </Row>
 
         <button onClick={() => onSave(form)} className="btn btn-primary btn-lg" style={{ width: '100%', marginTop: 8 }}>
