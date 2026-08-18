@@ -342,7 +342,7 @@ export default function KidDashboard() {
     const completedIds = new Set(completions.map(c => c.task_id))
     for (const task of tasks) {
       if (completedIds.has(task.id)) continue
-      const status = getTaskStatus(task)
+      const status = getTaskStatus(task, false, viewDateRef.current)
       const prev = prevStatusMapRef.current[task.id]
       if (prev && prev !== status) {
         if (prev === 'upcoming' && status === 'active') {
@@ -707,6 +707,8 @@ export default function KidDashboard() {
               <TaskCard
                 key={task.id}
                 task={task}
+                kidId={profile.id}
+                viewDate={viewDateRef.current}
                 coinPop={coinPops.find(p => p.taskId === task.id)}
                 onComplete={(timeSpentSecs) => completeTask(task, timeSpentSecs)}
                 now={now}
@@ -723,49 +725,91 @@ export default function KidDashboard() {
 }
 
 // ─── TaskCard ─────────────────────────────────────────────────────────────────
-function TaskCard({ task, coinPop, onComplete, now, isToday }) {
-  const status = getTaskStatus(task)
+function TaskCard({ task, kidId, viewDate, coinPop, onComplete, now, isToday }) {
+  const status = getTaskStatus(task, false, viewDate)
   const [countdown, setCountdown] = useState(secondsUntilChange(task, status))
-  const isFocus = task.task_type === 'focus' && task.target_duration > 0
 
-  // Focus timer state
-  const [timer, setTimer] = useState({ started: false, running: false, remaining: task.target_duration || 0, elapsed: 0 })
+  // Session = task_type 'session' or legacy 'focus', with a duration
+  const sessionDuration = (() => {
+    if (task.target_duration > 0) return task.target_duration
+    if (!task.start_time || !task.deadline_time) return 0
+    const [sh, sm] = task.start_time.split(':').map(Number)
+    const [dh, dm] = task.deadline_time.split(':').map(Number)
+    const secs = (dh * 60 + dm - sh * 60 - sm) * 60
+    return secs > 0 ? secs : 0
+  })()
+  const isFocus = (task.task_type === 'session' || task.task_type === 'focus') && sessionDuration > 0
+
+  // Session timer state — no pause, just Start → Stop → Start → Done
+  const [timer, setTimer] = useState({
+    running: false,
+    hasStarted: false,
+    remaining: sessionDuration,
+    totalElapsed: 0,    // accumulated across all completed runs
+  })
   const timerRef = useRef(null)
+  const runStartRef = useRef(null)   // ISO string when current run began
 
   useEffect(() => {
     if (status === 'missed') return
-    const t = setInterval(() => setCountdown(secondsUntilChange(task, getTaskStatus(task))), 1000)
+    const t = setInterval(() => setCountdown(secondsUntilChange(task, getTaskStatus(task, false, viewDate))), 1000)
     return () => clearInterval(t)
   }, [status])
 
-  // Focus timer tick
+  // Timer tick — counts down, also tracks totalElapsed live
   useEffect(() => {
     if (!timer.running) { clearInterval(timerRef.current); return }
     timerRef.current = setInterval(() => {
       setTimer(prev => {
-        const newRemaining = prev.remaining - 1
-        const newElapsed = prev.elapsed + 1
-        if (newRemaining <= 0) {
-          clearInterval(timerRef.current)
-          return { ...prev, remaining: 0, elapsed: newElapsed, running: false }
-        }
-        return { ...prev, remaining: newRemaining, elapsed: newElapsed }
+        const newRemaining = Math.max(0, prev.remaining - 1)
+        return { ...prev, remaining: newRemaining, totalElapsed: prev.totalElapsed + 1 }
       })
     }, 1000)
     return () => clearInterval(timerRef.current)
   }, [timer.running])
 
-  // Auto-complete when focus timer hits 0
-  useEffect(() => {
-    if (isFocus && timer.started && timer.remaining === 0 && !timer.running) {
-      onComplete(timer.elapsed)
-    }
-  }, [timer.remaining, timer.running])
+  async function startTimer() {
+    runStartRef.current = new Date().toISOString()
+    setTimer(prev => ({ ...prev, running: true, hasStarted: true }))
+  }
 
-  function startTimer() { setTimer(prev => ({ ...prev, started: true, running: true })) }
-  function pauseTimer() { setTimer(prev => ({ ...prev, running: false })) }
-  function resumeTimer() { setTimer(prev => ({ ...prev, running: true })) }
-  function doneEarly() { clearInterval(timerRef.current); onComplete(timer.elapsed) }
+  async function stopTimer() {
+    clearInterval(timerRef.current)
+    const endedAt = new Date().toISOString()
+    const startedAt = runStartRef.current
+    if (startedAt) {
+      const runSecs = Math.round((new Date(endedAt) - new Date(startedAt)) / 1000)
+      if (runSecs > 0) {
+        await supabase.from('session_runs').insert({
+          task_id: task.id, kid_id: kidId, scheduled_date: viewDate,
+          started_at: startedAt, ended_at: endedAt, duration_secs: runSecs,
+        })
+      }
+    }
+    runStartRef.current = null
+    setTimer(prev => ({ ...prev, running: false }))
+  }
+
+  async function doneSession() {
+    clearInterval(timerRef.current)
+    const endedAt = new Date().toISOString()
+    const startedAt = runStartRef.current
+    let finalElapsed = timer.totalElapsed
+    // Save current run if it was running
+    if (startedAt && timer.running) {
+      const runSecs = Math.round((new Date(endedAt) - new Date(startedAt)) / 1000)
+      if (runSecs > 0) {
+        await supabase.from('session_runs').insert({
+          task_id: task.id, kid_id: kidId, scheduled_date: viewDate,
+          started_at: startedAt, ended_at: endedAt, duration_secs: runSecs,
+        })
+        finalElapsed += runSecs
+      }
+    }
+    runStartRef.current = null
+    setTimer(prev => ({ ...prev, running: false }))
+    onComplete(finalElapsed)
+  }
 
   const statusConfig = {
     upcoming: { bg: 'rgba(255,255,255,0.03)', border: 'var(--border)',              label: 'Upcoming',     labelColor: '#94a3b8', icon: '⏰' },
@@ -778,14 +822,20 @@ function TaskCard({ task, coinPop, onComplete, now, isToday }) {
   const isActionable = isToday
 
   // Timer display colour
-  const timerRatio = task.target_duration > 0 ? timer.remaining / task.target_duration : 1
+  const timerRatio = sessionDuration > 0 ? timer.remaining / sessionDuration : 1
   const timerColor = timerRatio > 0.5 ? '#22c55e' : timerRatio > 0.25 ? '#f97316' : '#ef4444'
+  const totalElapsedMins = Math.floor(timer.totalElapsed / 60)
+  const scheduledMins = Math.round(sessionDuration / 60)
+
+  // Session cards get a blue left accent; task cards get standard styling
+  const sessionAccent = isFocus ? '3px solid rgba(79,142,247,0.6)' : undefined
 
   return (
     <div style={{
       position: 'relative',
-      background: cfg.bg,
-      border: `1px solid ${cfg.border}`,
+      background: isFocus ? 'rgba(79,142,247,0.04)' : cfg.bg,
+      border: `1px solid ${isFocus ? 'rgba(79,142,247,0.25)' : cfg.border}`,
+      borderLeft: sessionAccent || `1px solid ${cfg.border}`,
       borderRadius: 16,
       padding: '14px 16px',
       marginBottom: 10,
@@ -828,7 +878,7 @@ function TaskCard({ task, coinPop, onComplete, now, isToday }) {
                 background: 'rgba(79,142,247,0.1)', color: '#4f8ef7',
                 border: '1px solid rgba(79,142,247,0.3)', fontSize: 10,
               }}>
-                ⏱ Focus
+                ⏱ Session
               </span>
             )}
             {task.requires_approval && (
@@ -863,47 +913,66 @@ function TaskCard({ task, coinPop, onComplete, now, isToday }) {
                 : `+${previewCoins} coins`
               }
               {task.requires_approval ? ' · needs approval' : ''}
-              {isFocus && task.target_duration > 0 && ` · ${formatDuration(task.target_duration)} target`}
+              {isFocus && sessionDuration > 0 && ` · ${formatDuration(sessionDuration)} session`}
             </span>
           </div>
 
-          {/* Focus timer display */}
-          {isFocus && timer.started && (
+          {/* Session timer display — shown once started */}
+          {isFocus && timer.hasStarted && (
             <div style={{
-              marginTop: 8, display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 12px', borderRadius: 10,
+              marginTop: 8, borderRadius: 10,
               background: 'rgba(0,0,0,0.3)', border: `1px solid ${timerColor}44`,
+              overflow: 'hidden',
             }}>
-              <span style={{
-                fontVariantNumeric: 'tabular-nums',
-                fontSize: 26, fontWeight: 800, color: timerColor,
-                letterSpacing: -1,
-                ...(timer.running && timer.remaining < 30 ? { animation: 'timerPulse 1s infinite' } : {}),
-              }}>
-                {formatDuration(timer.remaining)}
-              </span>
-              <div style={{ display: 'flex', gap: 6, flex: 1, justifyContent: 'flex-end' }}>
-                {timer.running ? (
-                  <button onClick={pauseTimer} style={{
-                    padding: '6px 14px', borderRadius: 8,
-                    background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(249,115,22,0.4)',
-                    color: '#f97316', fontWeight: 700, fontSize: 13,
-                  }}>⏸ Pause</button>
-                ) : timer.remaining > 0 ? (
-                  <button onClick={resumeTimer} style={{
-                    padding: '6px 14px', borderRadius: 8,
-                    background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)',
-                    color: '#22c55e', fontWeight: 700, fontSize: 13,
-                  }}>▶ Resume</button>
-                ) : null}
-                {timer.elapsed > 0 && (
-                  <button onClick={doneEarly} style={{
-                    padding: '6px 14px', borderRadius: 8,
-                    background: 'rgba(245,197,24,0.15)', border: '1px solid rgba(245,197,24,0.4)',
-                    color: '#f5c518', fontWeight: 700, fontSize: 13,
-                  }}>✅ Done</button>
+              {/* Countdown + accumulated time */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px' }}>
+                <div>
+                  <span style={{
+                    fontVariantNumeric: 'tabular-nums',
+                    fontSize: 28, fontWeight: 800, color: timerColor,
+                    letterSpacing: -1, display: 'block',
+                    ...(timer.running && timer.remaining < 30 ? { animation: 'timerPulse 1s infinite' } : {}),
+                  }}>
+                    {formatDuration(timer.remaining)}
+                  </span>
+                  <span style={{ fontSize: 10, color: '#475569' }}>remaining</span>
+                </div>
+                {timer.totalElapsed > 0 && (
+                  <div style={{ marginLeft: 4 }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: '#4f8ef7', display: 'block' }}>
+                      {formatDuration(timer.totalElapsed)}
+                    </span>
+                    <span style={{ fontSize: 10, color: '#475569' }}>studied so far</span>
+                  </div>
                 )}
+                <div style={{ display: 'flex', gap: 6, flex: 1, justifyContent: 'flex-end' }}>
+                  {timer.running ? (
+                    <button onClick={stopTimer} style={{
+                      padding: '6px 14px', borderRadius: 8,
+                      background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.4)',
+                      color: '#ef4444', fontWeight: 700, fontSize: 13,
+                    }}>⏹ Stop</button>
+                  ) : timer.remaining > 0 ? (
+                    <button onClick={startTimer} style={{
+                      padding: '6px 14px', borderRadius: 8,
+                      background: 'rgba(79,142,247,0.15)', border: '1px solid rgba(79,142,247,0.4)',
+                      color: '#4f8ef7', fontWeight: 700, fontSize: 13,
+                    }}>▶ Resume</button>
+                  ) : null}
+                </div>
               </div>
+              {/* Done button — full width at bottom */}
+              {!timer.running && timer.totalElapsed > 0 && (
+                <button onClick={doneSession} style={{
+                  width: '100%', padding: '10px',
+                  background: 'rgba(34,197,94,0.15)', borderTop: '1px solid rgba(34,197,94,0.2)',
+                  color: '#22c55e', fontWeight: 800, fontSize: 14,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                }}>
+                  ✅ Done — I studied {totalElapsedMins > 0 ? `${totalElapsedMins} min` : `${timer.totalElapsed}s`}
+                  {timer.totalElapsed >= sessionDuration && <span style={{ color: '#f5c518' }}>🏆</span>}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -912,7 +981,8 @@ function TaskCard({ task, coinPop, onComplete, now, isToday }) {
         {isActionable && status !== 'missed' && (
           <div style={{ flexShrink: 0 }}>
             {isFocus ? (
-              !timer.started ? (
+              !timer.hasStarted ? (
+                // First start — blue session button
                 <button
                   onClick={startTimer}
                   style={{
@@ -921,21 +991,21 @@ function TaskCard({ task, coinPop, onComplete, now, isToday }) {
                     color: '#4f8ef7', fontWeight: 700, fontSize: 13,
                   }}
                 >▶ Start</button>
-              ) : null
+              ) : null  // controls move into the timer display panel once started
             ) : (
-              // Quick task
+              // Quick task — green Done button
               <button
                 onClick={() => onComplete(null)}
                 style={{
                   padding: '12px 16px', borderRadius: 12,
                   background: status === 'grace'
-                    ? 'rgba(249,115,22,0.2)' : 'rgba(245,197,24,0.2)',
+                    ? 'rgba(249,115,22,0.2)' : 'rgba(34,197,94,0.15)',
                   border: status === 'grace'
-                    ? '1px solid rgba(249,115,22,0.4)' : '1px solid rgba(245,197,24,0.4)',
-                  color: status === 'grace' ? '#f97316' : '#f5c518',
+                    ? '1px solid rgba(249,115,22,0.4)' : '1px solid rgba(34,197,94,0.35)',
+                  color: status === 'grace' ? '#f97316' : '#22c55e',
                   fontWeight: 700, fontSize: 13,
                 }}
-              >Done!</button>
+              >✓ Done</button>
             )}
           </div>
         )}

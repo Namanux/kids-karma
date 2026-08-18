@@ -18,9 +18,11 @@ export function calculateCoins(task, completedAt = new Date()) {
   const now = new Date(completedAt)
   const today = now.toISOString().split('T')[0]
 
-  const deadline = new Date(`${today}T${task.deadline_time}`)
+  // Use expiry_time as the "active window end" (was deadline_time)
+  const activeEnd = task.expiry_time || task.start_time
+  const deadline = activeEnd ? new Date(`${today}T${activeEnd}`) : null
 
-  if (now <= deadline) {
+  if (!deadline || now <= deadline) {
     return task.full_coins
   }
 
@@ -35,19 +37,37 @@ export function calculatePenalty(task) {
 /**
  * Current task status based on time of day
  */
-export function getTaskStatus(task, completedToday = false) {
+export function getTaskStatus(task, completedToday = false, viewDate = null) {
   if (completedToday) return 'done'
 
   const now = new Date()
-  const today = now.toISOString().split('T')[0]
+  const todayStr = now.toISOString().split('T')[0]
+  const dateStr = viewDate || todayStr
 
-  const start    = new Date(`${today}T${task.start_time}`)
-  const deadline = new Date(`${today}T${task.deadline_time}`)
-  const expiry   = new Date(`${today}T${task.expiry_time}`)
+  // For future dates, all tasks are upcoming; for past dates, all missed
+  if (dateStr > todayStr) return 'upcoming'
+  if (dateStr < todayStr) return 'missed'
 
-  if (now < start)    return 'upcoming'
-  if (now <= deadline) return 'active'
-  if (now <= expiry)  return 'grace'    // late but still doable
+  // Today: compare against real clock
+  const start  = new Date(`${dateStr}T${task.start_time}`)
+  // For sessions: active until start + target_duration; for tasks: active until expiry_time
+  const isSession = task.task_type === 'session' || task.task_type === 'focus'
+  let activeEnd, expiry
+  if (isSession && task.target_duration) {
+    const [sh, sm] = (task.start_time || '00:00').split(':').map(Number)
+    const endMins = sh * 60 + sm + Math.round(task.target_duration / 60)
+    const endStr = `${String(Math.floor(endMins/60)%24).padStart(2,'0')}:${String(endMins%60).padStart(2,'0')}`
+    activeEnd = new Date(`${dateStr}T${endStr}`)
+    expiry = activeEnd
+  } else {
+    const expiryStr = task.expiry_time || task.start_time
+    activeEnd = expiryStr ? new Date(`${dateStr}T${expiryStr}`) : start
+    expiry = activeEnd
+  }
+
+  if (now < start)      return 'upcoming'
+  if (now <= activeEnd) return 'active'
+  if (now <= expiry)    return 'grace'
   return 'missed'
 }
 
@@ -58,10 +78,11 @@ export function secondsUntilChange(task, status) {
   const now = new Date()
   const today = now.toISOString().split('T')[0]
 
+  const expiryStr = task.expiry_time || task.start_time
   const targets = {
     upcoming: new Date(`${today}T${task.start_time}`),
-    active:   new Date(`${today}T${task.deadline_time}`),
-    grace:    new Date(`${today}T${task.expiry_time}`),
+    active:   expiryStr ? new Date(`${today}T${expiryStr}`) : null,
+    grace:    expiryStr ? new Date(`${today}T${expiryStr}`) : null,
   }
 
   const target = targets[status]
@@ -89,6 +110,7 @@ export function coinsToLevel(totalCoins) {
 }
 
 export function formatTime(timeStr) {
+  if (!timeStr) return ''
   // "08:30:00" → "8:30 AM"
   const [h, m] = timeStr.split(':').map(Number)
   const ampm = h >= 12 ? 'PM' : 'AM'
